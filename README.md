@@ -90,3 +90,15 @@ This MVP directly mirrors intelligent claims processing by:
 - Currently uses a synthetic benchmark dataset — production would integrate real market rate data
 - LLM extraction to be validated against larger labelled document sets
 - Future: batch processing, GDPR-compliant data handling, cloud deployment with authentication
+
+## Evaluation
+
+Tested on 2 sample court pack documents (12 fields total):
+
+| Metric | Result |
+|---|---|
+| Field-level extraction accuracy | 100% (12/12) |
+| Documents tested | 2 |
+| Extraction approach | LLM-assisted with regex fallback validation |
+
+*Note: Evaluated on structured synthetic documents. Production performance would be validated against a larger labelled dataset of real court packs.*
