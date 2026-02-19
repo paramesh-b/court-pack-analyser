@@ -36,8 +36,12 @@ elif option == "Upload PDF":
 
 if text and st.button("🔍 Analyse Claim", type="primary"):
     with st.spinner("Analysing claim with AI..."):
-        result = analyse_claim(text)
-        log_result(result)
+        try:
+            result = analyse_claim(text)
+            log_result(result)
+        except Exception as e:
+            st.error("⚠️ Analysis failed. The document may not contain recognisable claim data. Please try a different file.")
+            st.stop()
 
     st.divider()
     st.subheader("📋 Claim Summary")
