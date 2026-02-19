@@ -1,0 +1,15 @@
+vehicle_category,daily_rate_gbp,weekly_rate_gbp,region
+Small (e.g. Ford Fiesta),35,210,National
+Medium (e.g. Ford Focus),45,270,National
+Large (e.g. Ford Mondeo),60,360,National
+SUV (e.g. Toyota RAV4),75,450,National
+Luxury (e.g. BMW 5 Series),120,720,National
+Van (Small),55,330,National
+Van (Large),80,480,National
+Small (e.g. Ford Fiesta),40,240,London
+Medium (e.g. Ford Focus),52,312,London
+Large (e.g. Ford Mondeo),68,408,London
+SUV (e.g. Toyota RAV4),85,510,London
+Luxury (e.g. BMW 5 Series),140,840,London
+Van (Small),65,390,London
+Van (Large),95,570,London
