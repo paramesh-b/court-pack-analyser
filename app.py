@@ -58,7 +58,6 @@ if st.session_state.get("doc_text") and st.button("🔍 Analyse Claim", type="pr
             st.session_state["result"] = result
         except Exception as e:
             st.error("⚠️ Analysis failed. The document may not contain recognisable claim data.")
-            st.stop()
 
 if "result" in st.session_state:
     result = st.session_state["result"]
