@@ -6,13 +6,13 @@ from extractor import extract_text_from_pdf, load_sample_text
 from analyser import analyse_claim
 from logger import log_result
 
-# RAG imports
+# RAG imports - stable versions only
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_groq import ChatGroq
-from langchain_community.chains import RetrievalQAWithSourcesChain
 from langchain_core.documents import Document
+from langchain_core.prompts import ChatPromptTemplate
 
 st.set_page_config(
     page_title="Court Pack Analyser",
@@ -46,7 +46,6 @@ elif option == "Upload PDF":
         with st.expander("View raw document text"):
             st.text(text)
 
-# store text in session so it persists after button clicks
 if text:
     st.session_state["doc_text"] = text
 
@@ -58,7 +57,7 @@ if st.session_state.get("doc_text") and st.button("🔍 Analyse Claim", type="pr
             log_result(result)
             st.session_state["result"] = result
         except Exception as e:
-            st.error("⚠️ Analysis failed. The document may not contain recognisable claim data. Please try a different file.")
+            st.error("⚠️ Analysis failed. The document may not contain recognisable claim data.")
             st.stop()
 
 if "result" in st.session_state:
@@ -117,13 +116,11 @@ if st.session_state.get("doc_text"):
     st.subheader("💬 Ask a Question About This Document")
     st.markdown(
         "Type any question in plain English. "
-        "The AI will search the document and answer from what it actually says — "
-        "not from guesswork."
+        "The AI will search the document and answer from what it actually says."
     )
 
     @st.cache_resource
     def build_vectorstore(doc_text: str):
-        """Split document into chunks, embed them, store in FAISS."""
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=400,
             chunk_overlap=50
@@ -145,30 +142,40 @@ if st.session_state.get("doc_text"):
         with st.spinner("Searching document and generating answer..."):
             try:
                 groq_key = os.getenv("GROQ_API_KEY")
-
                 vectorstore = build_vectorstore(st.session_state["doc_text"])
-                retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
+                # Retrieve top 3 relevant chunks
+                retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+                relevant_docs = retriever.invoke(question)
+                context = "\n\n".join([doc.page_content for doc in relevant_docs])
+
+                # Build prompt manually - no chain needed
                 llm = ChatGroq(
                     model="llama-3.1-8b-instant",
                     temperature=0,
                     api_key=groq_key
                 )
 
-                qa_chain = RetrievalQA.from_chain_type(
-                    llm=llm,
-                    chain_type="stuff",
-                    retriever=retriever,
-                    return_source_documents=True
-                )
+                prompt = ChatPromptTemplate.from_messages([
+                    ("system", 
+                     "You are an expert motor insurance claims analyst. "
+                     "Answer the question using ONLY the document sections provided below. "
+                     "If the answer is not in the document, say 'This information is not found in the document.' "
+                     "Be concise and factual.\n\nDocument sections:\n{context}"),
+                    ("human", "{question}")
+                ])
 
-                response = qa_chain({"query": question})
+                chain = prompt | llm
+                response = chain.invoke({
+                    "context": context,
+                    "question": question
+                })
 
                 st.success("**Answer:**")
-                st.write(response["result"])
+                st.write(response.content)
 
                 with st.expander("📄 Source sections used to generate this answer"):
-                    for i, doc in enumerate(response["source_documents"], 1):
+                    for i, doc in enumerate(relevant_docs, 1):
                         st.markdown(f"**Section {i}:**")
                         st.text(doc.page_content)
                         st.markdown("---")
