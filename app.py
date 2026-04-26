@@ -22,12 +22,12 @@ st.set_page_config(
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("📁 Document Library")
-    st.markdown("All indexed documents persist across sessions.")
+    st.markdown("Previously indexed documents (local only).")
 
     indexed_docs = CourtPackRAG.list_indexed_documents()
 
     if not indexed_docs:
-        st.info("No documents indexed yet.")
+        st.info("No persisted documents. Upload documents to index them.")
     else:
         st.success(f"{len(indexed_docs)} document(s) in store")
         for doc in indexed_docs:
@@ -50,7 +50,7 @@ with st.sidebar:
                     st.rerun()
 
     st.divider()
-    st.caption("Vector store: ChromaDB (persistent)")
+    st.caption("Vector store: ChromaDB (local) / FAISS (cloud)")
     st.caption("Embeddings: all-MiniLM-L6-v2")
     st.caption("LLM: Groq LLaMA 3.1-8b-instant")
 
@@ -76,6 +76,7 @@ if mode == "Single document":
         st.success(f"Uploaded: {uploaded_file.name}")
         st.session_state["doc_text"]         = text
         st.session_state["active_doc_label"] = uploaded_file.name
+        st.session_state.pop("batch_docs", None)
         with st.expander("View raw document text"):
             st.text(text)
 
@@ -85,6 +86,7 @@ elif mode == "Use sample court pack":
     st.success("Sample court pack loaded.")
     st.session_state["doc_text"]         = text
     st.session_state["active_doc_label"] = "sample_court_pack"
+    st.session_state.pop("batch_docs", None)
     with st.expander("View raw document text"):
         st.text(text)
 
@@ -92,7 +94,7 @@ elif mode == "Use sample court pack":
 elif mode == "Batch processing":
     st.markdown(
         "Upload multiple PDFs. Court pack documents will be analysed automatically. "
-        "All documents are indexed into ChromaDB for Q&A."
+        "All documents are indexed for Q&A."
     )
     uploaded_files = st.file_uploader(
         "Upload PDF documents",
@@ -106,6 +108,7 @@ elif mode == "Batch processing":
         batch_results = []
         indexed_names = []
         skipped_names = []
+        batch_docs    = {}  # filename → text (for Q&A switching)
 
         progress = st.progress(0, text="Starting...")
 
@@ -127,9 +130,12 @@ elif mode == "Batch processing":
                 except: pass
                 continue
 
-            # Index with real filename
+            # Store text for Q&A
+            batch_docs[file.name] = text
+
+            # Index into vector store
             try:
-                rag = CourtPackRAG()
+                rag      = CourtPackRAG()
                 n_chunks = rag.index_document(text, filename=file.name)
                 indexed_names.append(f"{file.name} ({n_chunks} chunks)")
             except Exception as e:
@@ -160,11 +166,17 @@ elif mode == "Batch processing":
 
         progress.progress(100, text="✅ Complete.")
 
+        # Save everything to session state
         st.session_state["batch_results"] = batch_results
         st.session_state["batch_indexed"] = indexed_names
         st.session_state["batch_skipped"] = skipped_names
         st.session_state["batch_total"]   = len(uploaded_files)
         st.session_state["batch_done"]    = True
+        st.session_state["batch_docs"]    = batch_docs  # all texts for Q&A
+        st.session_state.pop("doc_text", None)
+        st.session_state.pop("rag", None)
+        st.session_state.pop("rag_text", None)
+        st.session_state.pop("chat_history", None)
 
 # ── BATCH RESULTS ──────────────────────────────────────────────────────────────
 if mode == "Batch processing" and st.session_state.get("batch_done"):
@@ -182,7 +194,7 @@ if mode == "Batch processing" and st.session_state.get("batch_done"):
     col3.metric("Non-Court-Pack (Q&A only)", len(skipped_names))
 
     if indexed_names:
-        with st.expander(f"✅ {len(indexed_names)} document(s) indexed into ChromaDB"):
+        with st.expander(f"✅ {len(indexed_names)} document(s) indexed"):
             for name in indexed_names:
                 st.write(f"• {name}")
 
@@ -225,11 +237,8 @@ if mode == "Batch processing" and st.session_state.get("batch_done"):
         risk_counts = df["risk_level"].value_counts().reset_index()
         risk_counts.columns = ["Risk Level", "Count"]
         st.bar_chart(risk_counts.set_index("Risk Level"))
-
     else:
         st.info("No valid court pack documents found in the batch.")
-
-    st.info("💡 Refresh the page to see documents in the sidebar, then select one for Q&A.")
 
 # ── SINGLE DOC ANALYSE BUTTON ──────────────────────────────────────────────────
 if mode in ["Single document", "Use sample court pack"] and st.session_state.get("doc_text"):
@@ -296,76 +305,103 @@ if st.session_state.get("doc_text") and mode in ["Single document", "Use sample 
 st.divider()
 st.subheader("💬 Ask Questions About a Document")
 
+# Determine Q&A source
+batch_docs = st.session_state.get("batch_docs", {})
+doc_text   = st.session_state.get("doc_text")
 rag_ready  = "rag" in st.session_state
-doc_loaded = bool(st.session_state.get("doc_text"))
 
-if not rag_ready and not doc_loaded:
-    st.info("👈 Select a document from the sidebar or upload one above to start asking questions.")
+if not doc_text and not rag_ready and not batch_docs:
+    st.info("👈 Upload a document or select one from the sidebar to start asking questions.")
 else:
-    # Build RAG index from doc_text if not already done
-    if doc_loaded and (
+    # ── BATCH MODE: show document selector dropdown ────────────────────────────
+    if mode == "Batch processing" and batch_docs:
+        selected_doc = st.selectbox(
+            "Select a document to ask questions about:",
+            options=list(batch_docs.keys()),
+            key="batch_doc_selector"
+        )
+
+        # Load selected doc into RAG if changed
+        selected_text = batch_docs[selected_doc]
+        if (
+            "rag" not in st.session_state or
+            st.session_state.get("active_doc_label") != selected_doc
+        ):
+            with st.spinner(f"Loading {selected_doc} for Q&A..."):
+                rag = CourtPackRAG()
+                n   = rag.index_document(selected_text, filename=selected_doc)
+                st.session_state["rag"]              = rag
+                st.session_state["rag_text"]         = selected_doc
+                st.session_state["active_doc_label"] = selected_doc
+                st.session_state.pop("chat_history", None)
+            st.caption(f"✅ {n} chunks embedded with all-MiniLM-L6-v2")
+
+    # ── SINGLE/SAMPLE MODE: build RAG from doc_text ────────────────────────────
+    elif doc_text and (
         "rag" not in st.session_state or
-        st.session_state.get("rag_text") != st.session_state.get("doc_text")
+        st.session_state.get("rag_text") != doc_text
     ):
-        with st.spinner("Indexing into ChromaDB..."):
+        with st.spinner("Indexing into vector store..."):
             rag   = CourtPackRAG()
             label = st.session_state.get("active_doc_label", "Unknown")
-            n     = rag.index_document(st.session_state["doc_text"], filename=label)
+            n     = rag.index_document(doc_text, filename=label)
             st.session_state["rag"]      = rag
-            st.session_state["rag_text"] = st.session_state["doc_text"]
-        st.caption(f"✅ {n} chunks embedded with all-MiniLM-L6-v2 → ChromaDB")
+            st.session_state["rag_text"] = doc_text
+        st.caption(f"✅ {n} chunks embedded with all-MiniLM-L6-v2")
 
-    active_label = st.session_state.get("active_doc_label", "Current document")
-    st.markdown(f"**Active document:** `{active_label}`")
+    # ── CHAT INTERFACE ─────────────────────────────────────────────────────────
+    if "rag" in st.session_state:
+        active_label = st.session_state.get("active_doc_label", "Current document")
+        st.markdown(f"**Active document:** `{active_label}`")
 
-    if "chat_history" not in st.session_state:
-        st.session_state["chat_history"] = []
-
-    for message in st.session_state["chat_history"]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    user_question = st.chat_input(
-        "e.g. What is this document about?  Who is the claimant?  What was the daily hire rate?"
-    )
-
-    if user_question:
-        with st.chat_message("user"):
-            st.markdown(user_question)
-        st.session_state["chat_history"].append({"role": "user", "content": user_question})
-
-        with st.spinner("Searching ChromaDB..."):
-            context = st.session_state["rag"].retrieve(user_question, k=3)
-
-        groq_key = os.getenv("GROQ_API_KEY")
-        llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=groq_key)
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system",
-             "You are an AI document analyst powered by a RAG (Retrieval-Augmented Generation) pipeline. "
-             "When asked about yourself, explain that you use RAG: documents are chunked, embedded with "
-             "all-MiniLM-L6-v2, stored persistently in ChromaDB, and the most relevant chunks are "
-             "retrieved via semantic similarity search to answer each question. "
-             "Answer using ONLY the retrieved document sections provided below. "
-             "If the answer is not present, say exactly: "
-             "'This information is not found in the document.' "
-             "Do not guess or use outside knowledge.\n\nDocument sections:\n{context}"),
-            ("human", "{question}")
-        ])
-
-        with st.spinner("Generating answer..."):
-            chain    = prompt | llm
-            response = chain.invoke({"context": context, "question": user_question})
-            answer   = response.content.strip()
-
-        with st.chat_message("assistant"):
-            st.markdown(answer)
-        st.session_state["chat_history"].append({"role": "assistant", "content": answer})
-
-        with st.expander("📄 Retrieved chunks from ChromaDB"):
-            st.text(context)
-
-    if st.session_state.get("chat_history"):
-        if st.button("🗑️ Clear chat history"):
+        if "chat_history" not in st.session_state:
             st.session_state["chat_history"] = []
-            st.rerun()
+
+        for message in st.session_state["chat_history"]:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        user_question = st.chat_input(
+            "e.g. What is this document about?  Who is the claimant?  What was the daily hire rate?"
+        )
+
+        if user_question:
+            with st.chat_message("user"):
+                st.markdown(user_question)
+            st.session_state["chat_history"].append({"role": "user", "content": user_question})
+
+            with st.spinner("Searching vector store..."):
+                context = st.session_state["rag"].retrieve(user_question, k=3)
+
+            groq_key = os.getenv("GROQ_API_KEY")
+            llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, api_key=groq_key)
+
+            prompt = ChatPromptTemplate.from_messages([
+                ("system",
+                 "You are an AI document analyst powered by a RAG (Retrieval-Augmented Generation) pipeline. "
+                 "When asked about yourself, explain that you use RAG: documents are chunked, embedded with "
+                 "all-MiniLM-L6-v2, stored in a vector store, and the most relevant chunks are "
+                 "retrieved via semantic similarity search to answer each question. "
+                 "Answer using ONLY the retrieved document sections provided below. "
+                 "If the answer is not present, say exactly: "
+                 "'This information is not found in the document.' "
+                 "Do not guess or use outside knowledge.\n\nDocument sections:\n{context}"),
+                ("human", "{question}")
+            ])
+
+            with st.spinner("Generating answer..."):
+                chain    = prompt | llm
+                response = chain.invoke({"context": context, "question": user_question})
+                answer   = response.content.strip()
+
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+            st.session_state["chat_history"].append({"role": "assistant", "content": answer})
+
+            with st.expander("📄 Retrieved chunks from vector store"):
+                st.text(context)
+
+        if st.session_state.get("chat_history"):
+            if st.button("🗑️ Clear chat history"):
+                st.session_state["chat_history"] = []
+                st.rerun()
