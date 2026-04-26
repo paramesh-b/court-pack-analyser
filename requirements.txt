@@ -12,4 +12,3 @@ langchain-text-splitters
 langchain-core
 faiss-cpu
 sentence-transformers
-chromadb

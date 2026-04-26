@@ -1,20 +1,19 @@
 """
 RAG Pipeline for Court Pack Analyser
 -------------------------------------
-Chunks document text → embeds with sentence-transformers (all-MiniLM-L6-v2)
-→ stores persistently in ChromaDB → retrieves semantically relevant context.
+Auto-detects environment:
+  - Local machine      → ChromaDB (persistent vector store, survives restarts)
+  - Streamlit Cloud    → FAISS (in-memory, no disk writes required)
 
-Filenames are stored in doc_names.csv inside chroma_db so the Document
-Library shows real filenames instead of hash IDs.
+Detection uses the STREAMLIT_SHARING_MODE environment variable which
+Streamlit Cloud sets automatically.
 """
 
+import os
+import hashlib
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
-import chromadb
-import hashlib
-import os
 
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 CHROMA_DIR      = "./chroma_db"
@@ -31,9 +30,20 @@ CLAIM_QUERIES = {
 }
 
 
+def _is_cloud() -> bool:
+    """Detect if running on Streamlit Cloud."""
+    return (
+        os.environ.get("STREAMLIT_SHARING_MODE") is not None or
+        os.environ.get("IS_STREAMLIT_CLOUD") is not None or
+        "/mount/src" in os.getcwd()
+    )
+
+
 def _doc_id(text: str) -> str:
     return "doc_" + hashlib.md5(text.encode()).hexdigest()[:12]
 
+
+# ── ChromaDB helpers (local only) ─────────────────────────────────────────────
 
 def _load_names() -> dict:
     if not os.path.exists(METADATA_FILE):
@@ -63,7 +73,14 @@ def _save_name(collection_name: str, filename: str):
         pass
 
 
+# ── Main RAG class ─────────────────────────────────────────────────────────────
+
 class CourtPackRAG:
+    """
+    RAG pipeline with automatic backend selection:
+      - Local:  ChromaDB persistent vector store
+      - Cloud:  FAISS in-memory vector store
+    """
 
     def __init__(self):
         self.embeddings = HuggingFaceEmbeddings(
@@ -78,32 +95,17 @@ class CourtPackRAG:
         )
         self.vectorstore     = None
         self.collection_name = None
-        os.makedirs(CHROMA_DIR, exist_ok=True)
+        self.cloud           = _is_cloud()
+
+        if not self.cloud:
+            os.makedirs(CHROMA_DIR, exist_ok=True)
 
     def index_document(self, text: str, filename: str = "Unknown") -> int:
         """
-        Index document into ChromaDB.
-        Always saves the filename — even if collection already exists.
+        Index document. Uses ChromaDB locally, FAISS on Streamlit Cloud.
         Returns number of chunks.
         """
         self.collection_name = _doc_id(text)
-
-        # Always save/update the filename mapping first
-        _save_name(self.collection_name, filename)
-
-        client   = chromadb.PersistentClient(path=CHROMA_DIR)
-        existing = [c.name for c in client.list_collections()]
-
-        if self.collection_name in existing:
-            # Reuse existing collection — no re-embedding needed
-            self.vectorstore = Chroma(
-                collection_name=self.collection_name,
-                embedding_function=self.embeddings,
-                persist_directory=CHROMA_DIR,
-            )
-            return self.vectorstore._collection.count()
-
-        # New document — chunk, embed, persist
         chunks = self.splitter.split_text(text)
         if not chunks:
             raise ValueError("Document produced no chunks.")
@@ -116,16 +118,44 @@ class CourtPackRAG:
             for i, chunk in enumerate(chunks)
         ]
 
-        self.vectorstore = Chroma.from_documents(
-            documents=documents,
-            embedding=self.embeddings,
-            collection_name=self.collection_name,
-            persist_directory=CHROMA_DIR,
-        )
-        return len(chunks)
+        if self.cloud:
+            # FAISS — in-memory, no disk writes
+            from langchain_community.vectorstores import FAISS
+            self.vectorstore = FAISS.from_documents(documents, self.embeddings)
+            return len(chunks)
+
+        else:
+            # ChromaDB — persistent
+            import chromadb
+            from langchain_community.vectorstores import Chroma
+
+            _save_name(self.collection_name, filename)
+
+            client   = chromadb.PersistentClient(path=CHROMA_DIR)
+            existing = [c.name for c in client.list_collections()]
+
+            if self.collection_name in existing:
+                self.vectorstore = Chroma(
+                    collection_name=self.collection_name,
+                    embedding_function=self.embeddings,
+                    persist_directory=CHROMA_DIR,
+                )
+                return self.vectorstore._collection.count()
+
+            self.vectorstore = Chroma.from_documents(
+                documents=documents,
+                embedding=self.embeddings,
+                collection_name=self.collection_name,
+                persist_directory=CHROMA_DIR,
+            )
+            return len(chunks)
 
     def load_existing(self, collection_name: str) -> int:
-        """Load a previously indexed document by collection name."""
+        """Load a previously indexed document by collection name (local only)."""
+        if self.cloud:
+            raise RuntimeError("load_existing() is not available on Streamlit Cloud.")
+        import chromadb
+        from langchain_community.vectorstores import Chroma
         self.collection_name = collection_name
         self.vectorstore = Chroma(
             collection_name=collection_name,
@@ -148,10 +178,13 @@ class CourtPackRAG:
 
     @staticmethod
     def list_indexed_documents() -> list[dict]:
-        """Return all documents with real filenames for the sidebar."""
+        """Returns stored documents. Empty list on Streamlit Cloud."""
+        if _is_cloud():
+            return []
         if not os.path.exists(CHROMA_DIR):
             return []
         try:
+            import chromadb
             client    = chromadb.PersistentClient(path=CHROMA_DIR)
             names_map = _load_names()
             return [
@@ -167,7 +200,10 @@ class CourtPackRAG:
 
     @staticmethod
     def delete_document(collection_name: str) -> bool:
+        if _is_cloud():
+            return False
         try:
+            import chromadb
             client = chromadb.PersistentClient(path=CHROMA_DIR)
             client.delete_collection(collection_name)
             rows = _load_names()
